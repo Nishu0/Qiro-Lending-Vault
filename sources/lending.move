@@ -4,7 +4,6 @@ module qiro::lending_vault{
     use std::vector;
     use aptos_framework::timestamp;
     use aptos_framework::coin;
-    use aptos_framework::aptos_coin::AptosCoin;
     use aptos_framework::managed_coin;
     use aptos_std::type_info;
     use aptos_std::simple_map::{Self, SimpleMap};
@@ -18,31 +17,33 @@ module qiro::lending_vault{
     const EINVALID_ID: u64 = 5;
     const EINSUFFICIENT_PREFILLED: u64 = 6;
 
-
+    // Resources
     struct UserPool has store, drop{
         pool_address: address,
         total_deposit: u64,
+        timestamp: u64, 
     }
 
     struct UserPools has key, store{
         pools: vector<UserPool>,
     }
 
-    struct VaultPool has key, store{
+    struct LiquidityPool has key, store {
         coin_type: address,
+        whitelist: vector<address>,
         fee: u64,
     }
 
-    struct VaultPools has key, store{
-        pools: vector<LiquidityPool>,
+    struct LiquidityPools has key, store {
+        pools: vector<LiquidityPool>
     }
 
-    struct VaultPoolCap has key{
+    struct LiquidityPoolMap has key {
+        liquidity_pool_map: SimpleMap< vector<u8>,address>,
+    }
+
+    struct LiquidityPoolCap has key{
         liquidity_pool_cap: account::SignerCapability,
-    }
-
-    struct VaultPoolMap has key{
-        liquidity_pool_map:SimpleMap<vector<u8>,address>,
     }
 
     fun coin_address<CoinType>(): address {
@@ -50,55 +51,62 @@ module qiro::lending_vault{
         type_info::account_address(&type_info)
     }
 
-    // Resources
-    struct Deposit has key, store, drop, copy {
-        id: u64, 
-        amount: u64, 
-        timestamp: u64,
-        user: address, 
-    }
-    struct Vault has key {
-        vault_address: address,
-        admin: address,
-        whitelist: vector<address>, 
-        deposits: vector<Deposit>,
-        prefilled: u64,
-    }
-    struct VaultCap has key{
-        vault_cap: account::SignerCapability,
-    }
     // Entry functions
-    public entry fun new_vault(account: &signer, prefilled: u64) {
-        assert!(!exists<Vault>(signer::address_of(account)), EALREADY_VAULT);
-        let vault = Vault {
-            vault_address: signer::address_of(account),
-            admin: signer::address_of(account),
-            whitelist: vector::empty(),
-            deposits: vector::empty(),
-            prefilled,
+    public entry fun deploy_pool<CoinType>(account: &signer, fee:u64, seeds: vector<u8>) acquires LiquidityPoolMap , LiquidityPools{
+        let account_addr = signer::address_of(account);
+
+        let (liquidity_pool, liquidity_pool_cap) = account::create_resource_account(account, seeds); //resource account
+        let liquidity_pool_address = signer::address_of(&liquidity_pool);
+
+        if (!exists<LiquidityPoolMap>(account_addr)) {
+            move_to(account, LiquidityPoolMap {liquidity_pool_map: simple_map::create()})
         };
-        move_to(account, vault);
+
+        let maps = borrow_global_mut<LiquidityPoolMap>(account_addr);
+        simple_map::add(&mut maps.liquidity_pool_map, seeds,liquidity_pool_address);
+
+        let pool_signer_from_cap = account::create_signer_with_capability(&liquidity_pool_cap);
+        let coin_address = coin_address<CoinType>();
+
+        let liquidity_pool = LiquidityPool {
+            coin_type: coin_address,
+            whitelist: vector::empty(),
+            fee: fee
+        };
+
+        if(!exists<LiquidityPools>(account_addr))
+        {
+            let pools = vector[];
+            vector::push_back(&mut pools, liquidity_pool);
+            move_to<LiquidityPools>(account, LiquidityPools{pools});
+        } else {
+            let pools = borrow_global_mut<LiquidityPools>(account_addr);
+            vector::push_back(&mut pools.pools, liquidity_pool);
+        };
+        move_to<LiquidityPoolCap>(&pool_signer_from_cap, LiquidityPoolCap{
+            liquidity_pool_cap: liquidity_pool_cap
+        });
+        managed_coin::register<CoinType>(&pool_signer_from_cap); 
     }
 
-    public entry fun add_to_whitelist(account: &signer, addresses: vector<address>) acquires Vault {
-        let vault = borrow_global_mut<Vault>(signer::address_of(account));
-        assert!(vault.admin == signer::address_of(account), ENOT_ADMIN);
+    public entry fun add_to_whitelist(account: &signer, addresses: vector<address>) acquires LiquidityPool {
+        let liquidity_pool = borrow_global_mut<LiquidityPool>(signer::address_of(account));
         let i = 0;
         let len = vector::length(&addresses);
         while (i < len) {
             let addr = vector::borrow(&addresses, i);
-            vector::push_back(&mut vault.whitelist, *addr);
+            vector::push_back(&mut liquidity_pool.whitelist, *addr);
             i = i + 1;
         };
     }
     //To check if the user is whitelisted
     #[view]
-    public fun is_whitelisted(vault_address: address, user_address: address): bool acquires Vault {
-        let vault = borrow_global<Vault>(vault_address);
+    public fun is_whitelisted(liquidity_pool_address: address, user_address: address): bool acquires LiquidityPool {
+        let liquidity_pool = borrow_global<LiquidityPool>(liquidity_pool_address);
         let i = 0;
-        let len = vector::length(&vault.whitelist);
+        let len = vector::length(&liquidity_pool.whitelist);
         while (i < len) {
-            let addr = vector::borrow(&vault.whitelist, i);
+            let addr = vector::borrow(&liquidity_pool.whitelist, i);
             if (*addr == user_address) {
                 return true
             };
@@ -106,57 +114,60 @@ module qiro::lending_vault{
         };
         return false
     }
-    // To generate a unique id for each deposit
-    public fun generate_id(): u64 {
-        timestamp::now_seconds()
-    }
     // To calculate the interest
     // #[view]
-    public fun calculate_interest(deposit: Deposit): u64 {
-        let time = timestamp::now_seconds() - deposit.timestamp;
-        let interest = (deposit.amount * INTEREST_RATE * time) / 100;
-        interest
-    }
-    
-    // Deposit function
-    public entry fun deposit( user: &signer, vault_address: address, amount: u64) acquires Vault {
-        assert!(is_whitelisted(vault_address, signer::address_of(user)), ENOT_WHITELISTED);
-        let user_balance = coin::balance<AptosCoin>(signer::address_of(user));
-        assert!(user_balance >= amount, EINSUFFICIENT_BALANCE);
-        coin::transfer<AptosCoin>(user, vault_address, amount);
-        let id = generate_id();
-        let timestamp = timestamp::now_seconds();
-        let deposit = Deposit {
-            id,
-            amount,
-            timestamp,
-            user: signer::address_of(user),
+    // public fun calculate_interest(user_pool: UserPool): u64 {
+    //     let time = timestamp::now_seconds() - user_pool.timestamp;
+    //     let interest = (user_pool.total_deposit * INTEREST_RATE * time) / 100;
+    //     interest
+    // }
+    public entry fun deposit<CoinType>(account: &signer, pool_address: address, amount: u64) acquires UserPools {
+        let signer_address = signer::address_of(account);
+        
+        if(!exists<UserPools>(signer_address))
+        {
+           managed_coin::register<CoinType>(account);    
+            let pool = UserPool {
+               pool_address,
+               total_deposit: amount,
+               timestamp: timestamp::now_seconds(),
+            };          
+            let pools = vector[];
+            vector::push_back(&mut pools, pool);            
+            move_to<UserPools>(account, UserPools{pools});
+        } 
+        else {
+            let pool = borrow_global_mut<UserPools>(signer_address); 
+            let count = 0;
+            let pool_length = vector::length(&pool.pools);
+            while(count < pool_length) {
+                let pool = vector::borrow_mut(&mut pool.pools, count);
+                if(pool.pool_address == pool_address) {
+                    pool.total_deposit = pool.total_deposit + amount;
+                    break
+                };   
+                count = count + 1;
+            }           
         };
-        let vault = borrow_global_mut<Vault>(vault_address);
-        vector::push_back(&mut vault.deposits, deposit);
+        coin::transfer<CoinType>(account, pool_address, amount);
     }
 
-    //withdraw function with amount as parameter
-    public entry fun withdraw_amount(vault_address: address, user: address, amount: u64) acquires Vault, VaultCap {
-        let vaultcap = borrow_global_mut<VaultCap>(vault_address);
-        let vault_signer_cap = account::create_signer_with_capability(&vaultcap.vault_cap);
-        let vault = borrow_global_mut<Vault>(vault_address);
-        let count = 0;
-        let len = vector::length(&vault.deposits);
-        while (count < len) {
-            let deposit = vector::borrow_mut(&mut vault.deposits, count);
-            if (deposit.user == user) {
-                let interest = calculate_interest(*deposit);
-                let total_amount = deposit.amount + interest;
-                if (total_amount >= amount) {
-                    // coin::transfer<AptosCoin>(&vault_signer_cap, user, amount);
-                    deposit.amount = deposit.amount - amount;
-                    //vector::replace(&mut vault.deposits, count, *deposit);
+    public entry fun withdraw<CoinType>( account: address, pool_address: address, amount: u64) acquires UserPools, LiquidityPoolCap {
+        let pool = borrow_global_mut<LiquidityPoolCap>(pool_address);
+        let pool_signer_from_cap = account::create_signer_with_capability(&pool.liquidity_pool_cap);
+
+        let user_pools = borrow_global_mut<UserPools>(account); 
+            let count = 0;
+            let pool_length =  vector::length(&user_pools.pools);
+            while(count < pool_length) {
+                let pool = vector::borrow_mut(&mut user_pools.pools, count);
+                if(pool.pool_address == pool_address) {
+                    pool.total_deposit = pool.total_deposit - amount;
+                    break
                 };
-            };
-            count = count + 1;
-        };
-        coin::transfer<AptosCoin>(&vault_signer_cap, user, amount);
+                count = count + 1;
+            };  
+                 
+        coin::transfer<CoinType>(&pool_signer_from_cap, account, amount);
     }
-    
 }

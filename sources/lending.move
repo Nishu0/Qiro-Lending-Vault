@@ -6,8 +6,6 @@ module qiro::lending_vault{
     use aptos_framework::coin;
     use aptos_framework::aptos_coin::AptosCoin;
     
-
-
     // Errors
     const EALREADY_VAULT: u64 = 1;
     const ENOT_ADMIN: u64 = 2;
@@ -17,15 +15,15 @@ module qiro::lending_vault{
     const EINVALID_ID: u64 = 5;
     const EINSUFFICIENT_PREFILLED: u64 = 6;
 
-
-
     // Resources
-    struct Deposit has key, store, drop {
+    struct Deposit has key, store, drop, copy {
         id: u64, 
         amount: u64, 
-        timestamp: u64, 
+        timestamp: u64,
+        user: address, 
     }
     struct Vault has key {
+        vault_address: address,
         admin: address,
         whitelist: vector<address>, 
         deposits: vector<Deposit>,
@@ -34,11 +32,11 @@ module qiro::lending_vault{
     struct VaultCap has key{
         vault_cap: account::SignerCapability,
     }
-
     // Entry functions
     public entry fun new_vault(account: &signer, prefilled: u64) {
         assert!(!exists<Vault>(signer::address_of(account)), EALREADY_VAULT);
         let vault = Vault {
+            vault_address: signer::address_of(account),
             admin: signer::address_of(account),
             whitelist: vector::empty(),
             deposits: vector::empty(),
@@ -59,6 +57,7 @@ module qiro::lending_vault{
         };
     }
     //To check if the user is whitelisted
+    #[view]
     public fun is_whitelisted(vault_address: address, user_address: address): bool acquires Vault {
         let vault = borrow_global<Vault>(vault_address);
         let i = 0;
@@ -77,16 +76,18 @@ module qiro::lending_vault{
         timestamp::now_seconds()
     }
     // To calculate the interest
-    public fun calculate_interest(deposit: &Deposit): u64 {
-        let current = timestamp::now_seconds();
-        let elapsed = current - deposit.timestamp;
-        let rate = INTEREST_RATE / (365 * 24 * 60 * 60);
-        let interest = deposit.amount * rate * elapsed;
+    // #[view]
+    public fun calculate_interest(deposit: Deposit): u64 {
+        let time = timestamp::now_seconds() - deposit.timestamp;
+        let interest = (deposit.amount * INTEREST_RATE * time) / 100;
         interest
     }
+    
     // Deposit function
-    public entry fun deposit(vault_address: address, user: &signer, amount: u64) acquires Vault {
+    public entry fun deposit( user: &signer, vault_address: address, amount: u64) acquires Vault {
         assert!(is_whitelisted(vault_address, signer::address_of(user)), ENOT_WHITELISTED);
+        let user_balance = coin::balance<AptosCoin>(signer::address_of(user));
+        assert!(user_balance >= amount, EINSUFFICIENT_BALANCE);
         coin::transfer<AptosCoin>(user, vault_address, amount);
         let id = generate_id();
         let timestamp = timestamp::now_seconds();
@@ -94,8 +95,11 @@ module qiro::lending_vault{
             id,
             amount,
             timestamp,
+            user: signer::address_of(user),
         };
         let vault = borrow_global_mut<Vault>(vault_address);
         vector::push_back(&mut vault.deposits, deposit);
     }
+
+    
 }

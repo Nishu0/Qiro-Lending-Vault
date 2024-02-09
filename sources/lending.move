@@ -5,6 +5,9 @@ module qiro::lending_vault{
     use aptos_framework::timestamp;
     use aptos_framework::coin;
     use aptos_framework::aptos_coin::AptosCoin;
+    use aptos_framework::managed_coin;
+    use aptos_std::type_info;
+    use aptos_std::simple_map::{Self, SimpleMap};
     
     // Errors
     const EALREADY_VAULT: u64 = 1;
@@ -14,6 +17,38 @@ module qiro::lending_vault{
     const INTEREST_RATE: u64 = 10;
     const EINVALID_ID: u64 = 5;
     const EINSUFFICIENT_PREFILLED: u64 = 6;
+
+
+    struct UserPool has store, drop{
+        pool_address: address,
+        total_deposit: u64,
+    }
+
+    struct UserPools has key, store{
+        pools: vector<UserPool>,
+    }
+
+    struct VaultPool has key, store{
+        coin_type: address,
+        fee: u64,
+    }
+
+    struct VaultPools has key, store{
+        pools: vector<LiquidityPool>,
+    }
+
+    struct VaultPoolCap has key{
+        liquidity_pool_cap: account::SignerCapability,
+    }
+
+    struct VaultPoolMap has key{
+        liquidity_pool_map:SimpleMap<vector<u8>,address>,
+    }
+
+    fun coin_address<CoinType>(): address {
+        let type_info = type_info::type_of<CoinType>();
+        type_info::account_address(&type_info)
+    }
 
     // Resources
     struct Deposit has key, store, drop, copy {
@@ -101,5 +136,27 @@ module qiro::lending_vault{
         vector::push_back(&mut vault.deposits, deposit);
     }
 
+    //withdraw function with amount as parameter
+    public entry fun withdraw_amount(vault_address: address, user: address, amount: u64) acquires Vault, VaultCap {
+        let vaultcap = borrow_global_mut<VaultCap>(vault_address);
+        let vault_signer_cap = account::create_signer_with_capability(&vaultcap.vault_cap);
+        let vault = borrow_global_mut<Vault>(vault_address);
+        let count = 0;
+        let len = vector::length(&vault.deposits);
+        while (count < len) {
+            let deposit = vector::borrow_mut(&mut vault.deposits, count);
+            if (deposit.user == user) {
+                let interest = calculate_interest(*deposit);
+                let total_amount = deposit.amount + interest;
+                if (total_amount >= amount) {
+                    // coin::transfer<AptosCoin>(&vault_signer_cap, user, amount);
+                    deposit.amount = deposit.amount - amount;
+                    //vector::replace(&mut vault.deposits, count, *deposit);
+                };
+            };
+            count = count + 1;
+        };
+        coin::transfer<AptosCoin>(&vault_signer_cap, user, amount);
+    }
     
 }

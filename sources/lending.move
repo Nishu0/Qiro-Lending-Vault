@@ -16,6 +16,8 @@ module qiro::lending_vault{
     const INTEREST_RATE: u64 = 10;
     const EINVALID_ID: u64 = 5;
     const EINSUFFICIENT_PREFILLED: u64 = 6;
+    const EALREADY_HAS_BALANCE: u64 = 7;
+    const EEQUAL_ADDR: u64 = 8;
 
     // Resources
     struct UserPool has store, drop{
@@ -46,6 +48,11 @@ module qiro::lending_vault{
 
     struct LiquidityPoolCap has key{
         liquidity_pool_cap: account::SignerCapability,
+    }
+
+    struct LPCoin has store, drop {
+        value: u64,
+        pool_address: address,
     }
 
     fun coin_address<CoinType>(): address {
@@ -125,14 +132,9 @@ module qiro::lending_vault{
         };
         return false
     }
-    //To calculate the interest
-    // #[view]
-    // public fun calculate_interest(userpool: UserPool): u64 {
-    //     let time = timestamp::now_seconds() - userpool.timestamp;
-    //     let interest = (userpool.total_deposit * INTEREST_RATE * time) / 100;
-    //     interest
-    // }
-    public entry fun deposit<CoinType>(account: &signer, pool_address: address, amount: u64) acquires UserPools {
+    
+    public entry fun deposit<CoinType>(account: &signer, pool_address: address, amount: u64) acquires UserPools{
+        
         let signer_address = signer::address_of(account);
         //To check if the user is whitelisted
         if(!exists<UserPools>(signer_address))
@@ -160,14 +162,18 @@ module qiro::lending_vault{
                 count = count + 1;
             }           
         };
+        //mint a coin
+        //managed_coin::mint<LPCoin>(account,signer_address, amount);
         coin::transfer<CoinType>(account, pool_address, amount);
+        
     }
 
-    public entry fun withdraw<CoinType>( account: address, pool_address: address, amount: u64) acquires UserPools, LiquidityPoolCap {
+    public entry fun withdraw<CoinType>( account: &signer, pool_address: address, amount: u64) acquires UserPools, LiquidityPoolCap {
+        let account_addr= signer::address_of(account);
         let pool = borrow_global_mut<LiquidityPoolCap>(pool_address);
         let pool_signer_from_cap = account::create_signer_with_capability(&pool.liquidity_pool_cap);
 
-        let user_pools = borrow_global_mut<UserPools>(account); 
+        let user_pools = borrow_global_mut<UserPools>(account_addr); 
             let count = 0;
             let pool_length =  vector::length(&user_pools.pools);
             while(count < pool_length) {
@@ -182,7 +188,9 @@ module qiro::lending_vault{
                 };
                 count = count + 1;
             };  
-                 
-        coin::transfer<CoinType>(&pool_signer_from_cap, account, amount);
+            
+        coin::transfer<CoinType>(&pool_signer_from_cap, account_addr, amount);
+        //managed_coin::burn<LPCoin>(account, amount);
     }
+    
 }

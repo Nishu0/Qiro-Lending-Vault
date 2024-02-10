@@ -23,6 +23,9 @@ module qiro::lending_vault{
         total_deposit: u64,
         timestamp: u64, 
     }
+    struct Whitelist has key, store, drop {
+        whitelist: vector<address>,
+    }
 
     struct UserPools has key, store{
         pools: vector<UserPool>,
@@ -30,7 +33,6 @@ module qiro::lending_vault{
 
     struct LiquidityPool has key, store {
         coin_type: address,
-        whitelist: vector<address>,
         fee: u64,
     }
 
@@ -52,10 +54,12 @@ module qiro::lending_vault{
     }
 
     // Entry functions
-    public entry fun deploy_pool<CoinType>(account: &signer, fee:u64, seeds: vector<u8>) acquires LiquidityPoolMap , LiquidityPools{
+    public entry fun deploy_pool<CoinType>(account: &signer, fee:u64, seeds: vector<u8>, funds:u64) acquires LiquidityPoolMap , LiquidityPools{
         let account_addr = signer::address_of(account);
 
         let (liquidity_pool, liquidity_pool_cap) = account::create_resource_account(account, seeds); //resource account
+        coin::register<CoinType>(&liquidity_pool);
+        coin::transfer<CoinType>(account, signer::address_of(&liquidity_pool), funds);
         let liquidity_pool_address = signer::address_of(&liquidity_pool);
 
         if (!exists<LiquidityPoolMap>(account_addr)) {
@@ -68,9 +72,16 @@ module qiro::lending_vault{
         let pool_signer_from_cap = account::create_signer_with_capability(&liquidity_pool_cap);
         let coin_address = coin_address<CoinType>();
 
+        let whitelist = Whitelist {
+            whitelist: vector::empty(),
+        };
+
+        if(!exists<Whitelist>(account_addr)){
+            move_to<Whitelist>(account, whitelist);
+        };
+
         let liquidity_pool = LiquidityPool {
             coin_type: coin_address,
-            whitelist: vector::empty(),
             fee: fee
         };
 
@@ -89,24 +100,24 @@ module qiro::lending_vault{
         managed_coin::register<CoinType>(&pool_signer_from_cap); 
     }
 
-    public entry fun add_to_whitelist(account: &signer, addresses: vector<address>) acquires LiquidityPool {
-        let liquidity_pool = borrow_global_mut<LiquidityPool>(signer::address_of(account));
+    public entry fun add_to_whitelist(account: &signer, addresses: vector<address>) acquires Whitelist {
+        let whitelist = borrow_global_mut<Whitelist>(signer::address_of(account));
         let i = 0;
         let len = vector::length(&addresses);
         while (i < len) {
             let addr = vector::borrow(&addresses, i);
-            vector::push_back(&mut liquidity_pool.whitelist, *addr);
+            vector::push_back(&mut whitelist.whitelist, *addr);
             i = i + 1;
         };
     }
     //To check if the user is whitelisted
     #[view]
-    public fun is_whitelisted(liquidity_pool_address: address, user_address: address): bool acquires LiquidityPool {
-        let liquidity_pool = borrow_global<LiquidityPool>(liquidity_pool_address);
+    public fun is_whitelisted(user_address: address): bool acquires Whitelist {
+        let whitelist = borrow_global<Whitelist>(user_address);
         let i = 0;
-        let len = vector::length(&liquidity_pool.whitelist);
+        let len = vector::length(&whitelist.whitelist);
         while (i < len) {
-            let addr = vector::borrow(&liquidity_pool.whitelist, i);
+            let addr = vector::borrow(&whitelist.whitelist, i);
             if (*addr == user_address) {
                 return true
             };
@@ -114,16 +125,16 @@ module qiro::lending_vault{
         };
         return false
     }
-    // To calculate the interest
+    //To calculate the interest
     // #[view]
-    // public fun calculate_interest(user_pool: UserPool): u64 {
-    //     let time = timestamp::now_seconds() - user_pool.timestamp;
-    //     let interest = (user_pool.total_deposit * INTEREST_RATE * time) / 100;
+    // public fun calculate_interest(userpool: UserPool): u64 {
+    //     let time = timestamp::now_seconds() - userpool.timestamp;
+    //     let interest = (userpool.total_deposit * INTEREST_RATE * time) / 100;
     //     interest
     // }
     public entry fun deposit<CoinType>(account: &signer, pool_address: address, amount: u64) acquires UserPools {
         let signer_address = signer::address_of(account);
-        
+        //To check if the user is whitelisted
         if(!exists<UserPools>(signer_address))
         {
            managed_coin::register<CoinType>(account);    
@@ -162,7 +173,11 @@ module qiro::lending_vault{
             while(count < pool_length) {
                 let pool = vector::borrow_mut(&mut user_pools.pools, count);
                 if(pool.pool_address == pool_address) {
-                    pool.total_deposit = pool.total_deposit - amount;
+                    //calculate the interest
+                    let time= timestamp::now_seconds() - pool.timestamp;
+                    let interest_amount = (pool.total_deposit * INTEREST_RATE * time) / (100 * 365 * 24 * 60 * 60);
+                    pool.total_deposit = pool.total_deposit - amount - interest_amount;
+                    amount = amount + interest_amount;
                     break
                 };
                 count = count + 1;
